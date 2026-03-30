@@ -184,29 +184,43 @@ jwt:
 
 ```text
 codesentry/
-├── backend/
-│   ├── cmd/server/          # 后端启动入口
-│   ├── internal/
-│   │   ├── config/          # 配置文件加载
-│   │   ├── handlers/        # API 路由与控制器
-│   │   ├── middleware/      # Auth鉴权、CORS等中间件
-│   │   ├── models/          # GORM 数据库模型
-│   │   ├── services/        # 核心业务逻辑 (AI引擎, Webhook处理)
-│   │   └── utils/           # 工具类
-│   └── go.mod
-├── frontend/
+├── backend/                  # Go 后端服务
+│   ├── cmd/
+│   │   ├── scripts/          # 维护脚本 (更新分数、规则等)
+│   │   └── server/           # 主程序启动入口 (main.go)
+│   ├── internal/             # 核心私有逻辑
+│   │   ├── config/           # yaml 配置文件解析
+│   │   ├── handlers/         # HTTP API 路由与控制器层
+│   │   ├── middleware/       # 中间件 (Auth鉴权, CORS, RateLimit等)
+│   │   ├── models/           # GORM 数据库实体模型定义
+│   │   ├── services/         # 核心业务逻辑层
+│   │   │   ├── webhook/      # Webhook 事件接收与解析引擎
+│   │   │   ├── ai.go         # 大模型调用与 Chunking 拆分引擎
+│   │   │   ├── file_context.go # V1 上下文提取与合并引擎
+│   │   │   ├── repo_map.go   # V2 AST 语法树与 Callers/Callee 追溯引擎
+│   │   │   └── task_queue.go # 异步任务队列与 Redis 调度
+│   │   └── utils/            # JWT、密码加密等通用工具类
+│   ├── pkg/                  # 公共包 (Logger, 统一响应封装等)
+│   ├── go.mod                # Go 依赖管理
+│   └── .air.toml             # Air 热重载配置
+├── frontend/                 # React 18 前端界面
+│   ├── public/               # 静态资源 (图标, 图片等)
 │   ├── src/
-│   │   ├── i18n/            # 国际化配置
-│   │   ├── layouts/         # 页面布局组件
-│   │   ├── pages/           # 核心业务页面
-│   │   ├── services/        # 前端 API 请求封装
-│   │   ├── stores/          # Zustand 状态管理
-│   │   └── types/           # TypeScript 类型定义
-│   └── package.json
-├── Dockerfile               # 生产环境打包构建文件
-├── docker-compose.yml       # 容器编排文件
-├── config.yaml.example      # 后端配置模板
-└── README.md
+│   │   ├── components/       # 全局复用组件 (通知, 搜索, 图表等)
+│   │   ├── constants/        # 全局常量与权限配置
+│   │   ├── hooks/            # 自定义 Hooks (React Query 数据获取等)
+│   │   ├── i18n/             # 国际化多语言配置 (中/英)
+│   │   ├── layouts/          # 整体页面骨架布局
+│   │   ├── pages/            # 核心业务页面视图
+│   │   ├── services/         # Axios API 请求封装
+│   │   ├── stores/           # Zustand 全局状态管理 (Auth, Theme)
+│   │   └── types/            # TypeScript 全局接口定义
+│   ├── package.json          # Node 依赖管理
+│   └── vite.config.ts        # Vite 构建配置
+├── Dockerfile                # 生产环境容器化打包脚本
+├── docker-compose.yml        # 容器编排部署文件
+├── config.yaml.example       # 后端配置示例文件
+└── README.md                 # 项目说明文档
 ```
 
 ## 许可证 (License)
