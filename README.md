@@ -4,9 +4,61 @@
   <img src="https://raw.githubusercontent.com/huangang/codesentry/main/frontend/public/codesentry-icon.png" alt="CodeSentry Logo" width="120" height="120">
 </div>
 
-AI-powered Code Review Platform for GitHub, GitLab, and Bitbucket.
+> **声明 / Disclaimer**: 
+> 本项目为基于 [huangang/codesentry](https://github.com/huangang/codesentry) 二次开发的分支版本，主要用于**学习、教育及架构研究用途**。
+> 感谢原作者 [huangang](https://github.com/huangang) 提供的优秀开源基础。
+
+AI-powered Code Review Platform for GitHub, GitLab, and Bitbucket. 
+具备双引擎 (V1/V2) 智能上下文解析与超大 PR 自动分批审查能力的专业级代码审查系统。
 
 [中文文档](./README_zh.md)
+
+## 核心架构与操作流程 (Operation Flow)
+
+本系统在处理代码审查（支持 Push 和 Merge Request 事件）时，采用多级防护与智能解析流水线：
+
+1. **Webhook 触发**: 接收来自 GitLab/GitHub 的 Push 或 MR 事件，提取变更信息。
+2. **前置过滤 (Max Files / Max File Size)**:
+   - 按照代码改动量对所有被修改的文件进行降序排列，仅保留前 `N` 个核心文件（可配置，防止内存溢出）。
+   - 拉取文件源码时，自动跳过超过 `Max File Size` 的超大文件。
+3. **双引擎上下文解析 (V1 / V2)**:
+   - 根据配置，系统将过滤后的文件送入 V1 或 V2 引擎进行上下文组装（详见下文引擎说明）。
+4. **智能分批审查 (Chunking)**:
+   - 在发送给 LLM 之前，检查组装好的 Prompt 总 Token/字符数。
+   - 如果超过设定阈值（如 50,000 字符），系统会**以文件为最小粒度**，将 PR 拆分为多个 Batch。
+   - **并发请求**多个 AI 模型实例，确保无论多大的提交都不会被截断。
+5. **聚合输出**: 将各批次的 AI 审查结果加权合并，通过 IM (钉钉/飞书/企微等) 通知用户，并在代码托管平台上回复 Comment。
+
+## 双引擎解析逻辑 (V1 vs V2 Review Modes)
+
+为了在“审查精度”与“Token 成本/响应速度”之间取得最佳平衡，系统内置了两套代码解析引擎：
+
+### V1 模式：轻量级极速审查
+- **定位**：适合日常小迭代、前端 UI 微调、配置文件修改，成本极低。
+- **核心逻辑**：基于纯文本的智能上下文提取。围绕代码修改点（Diff），自动提取上下 10 行作为上下文。
+- **智能合并 (Merge)**：如果一个文件内有多个修改点且距离较近（例如相距不到 20 行），系统会自动将这些修改点及上下文无缝合并为一个连贯的代码块，避免 AI 看到碎片化的代码而产生幻觉。
+
+### V2 模式：专家级深度审查 (AST 语法树)
+- **定位**：适合核心业务重构、底层数据结构变更等牵一发而动全身的复杂 PR，主打高精度防雷。
+- **完整函数包裹 (Function Context)**：利用 Tree-sitter AST 解析，不仅提取修改的那几行，而是把修改点所在的**整个函数/类**完整提取出来，并使用 `+` 和 `-` 标记具体修改位置。
+- **跨文件影响分析 (Callers Context)**：向上追溯。全网扫描**谁调用了被修改的函数**。例如，如果您修改了函数的输入输出参数，AI 能立刻结合 Callers 上下文判断是否会导致其他模块报错。
+- **底层规范校验 (Callee Context)**：向下校验。全网扫描**本次修改代码中调用的底层函数**。将底层函数的原始定义拿给 AI 看，确保您传入的参数类型、数量完全符合底层规范。
+- **孤儿代码兜底 (Orphan Hunks)**：如果修改的是全局变量、包导入（import）等不属于任何函数/类的顶层代码，V2 引擎会触发兜底机制，自动为其提供上下 5 行的全局上下文，确保没有任何一处修改被遗漏。
+
+## 关键 API 接口设计 (Key APIs)
+
+系统前后端分离，后端采用 Go 编写，提供标准 RESTful API：
+
+- **`/api/webhook/{platform}/{uuid}`**
+  核心入口，接收 GitHub/GitLab/Bitbucket 推送的事件，解析 Diff 并触发异步/同步审查队列。
+- **`/api/projects`**
+  项目管理接口，用于配置代码仓库的鉴权信息、指定使用的 LLM 模型及 Review Mode (V1/V2)。
+- **`/api/prompts`**
+  提示词管理，支持动态注入 `{{file_context}}`、`{{callers_context}}`、`{{callee_context}}` 等变量。
+- **`/api/logs/review`**
+  查询历史审查日志，支持分页、关键字检索及批量重试/删除。
+- **`/metrics`**
+  Prometheus 监控指标接口，实时暴露队列堆积、API 耗时及请求成功率。
 
 ## Features
 
