@@ -1,0 +1,639 @@
+import api from './api';
+import type {
+  LoginResponse,
+  AuthConfig,
+  User,
+  Project,
+  ReviewLog,
+  LLMConfig,
+  IMBot,
+  PromptTemplate,
+  PaginatedResponse,
+  DashboardResponse,
+  GitCredential,
+  LDAPConfig
+} from '../types';
+
+// Auth
+export const authApi = {
+  login: (username: string, password: string, authType: string = 'local') =>
+    api.post<LoginResponse>('/auth/login', { username, password, auth_type: authType }),
+
+  getConfig: () => api.get<AuthConfig>('/auth/config'),
+
+  getCurrentUser: () => api.get<User>('/auth/me'),
+
+  logout: () => api.post('/auth/logout'),
+
+  changePassword: (oldPassword: string, newPassword: string) =>
+    api.post<{ message: string }>('/auth/change-password', { old_password: oldPassword, new_password: newPassword }),
+
+  register: (data: Partial<User> & { password?: string }) =>
+    api.post<User>('/auth/register', data),
+};
+
+// Dashboard
+export const dashboardApi = {
+  getStats: (params?: { start_date?: string; end_date?: string; project_limit?: number; author_limit?: number }) =>
+    api.get<DashboardResponse>('/dashboard/stats', { params }),
+};
+
+// Projects
+export const projectApi = {
+  list: (params?: { page?: number; page_size?: number; name?: string; platform?: string }) =>
+    api.get<PaginatedResponse<Project>>('/projects', { params }),
+
+  getById: (id: number) => api.get<Project>(`/projects/${id}`),
+
+  create: (data: Partial<Project> & { access_token?: string; webhook_secret?: string }) =>
+    api.post<Project>('/projects', data),
+
+  update: (id: number, data: Partial<Project> & { access_token?: string; webhook_secret?: string }) =>
+    api.put<Project>(`/projects/${id}`, data),
+
+  delete: (id: number) => api.delete(`/projects/${id}`),
+
+  getDefaultPrompt: () => api.get<{ prompt: string }>('/projects/default-prompt'),
+};
+
+// Review Logs
+export const reviewLogApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    event_type?: string;
+    project_id?: number;
+    author?: string;
+    start_date?: string;
+    end_date?: string;
+    search_text?: string;
+  }) => api.get<PaginatedResponse<ReviewLog>>('/review-logs', { params }),
+
+  getById: (id: number) => api.get<ReviewLog>(`/review-logs/${id}`),
+
+  retry: (id: number) => api.post<{ message: string }>(`/review-logs/${id}/retry`),
+
+  createManual: (data: {
+    project_id: number;
+    commit_hash: string;
+    commit_url?: string;
+    branch?: string;
+    author: string;
+    author_email?: string;
+    commit_message?: string;
+    files_changed?: number;
+    additions?: number;
+    deletions?: number;
+    commit_date?: string;
+  }) => api.post<ReviewLog>('/review-logs/manual', data),
+
+  importCommits: (data: {
+    project_id: number;
+    start_date: string;
+    end_date: string;
+  }) => api.post<{ imported: number; skipped: number; errors?: string[] }>('/review-logs/import', data),
+
+  requestFix: (id: number) => api.post<{ message: string; pr_url: string }>(`/review-logs/${id}/fix`),
+
+  getFixStatus: (id: number) => api.get<{ fix_status: string; fix_pr_url: string }>(`/review-logs/${id}/fix-status`),
+};
+
+// LLM Configs
+export const llmConfigApi = {
+  list: (params?: { page?: number; page_size?: number; name?: string; provider?: string; is_active?: boolean }) =>
+    api.get<PaginatedResponse<LLMConfig>>('/llm-configs', { params }),
+
+  getById: (id: number) => api.get<LLMConfig>(`/llm-configs/${id}`),
+
+  getActive: () => api.get<LLMConfig[]>('/llm-configs/active'),
+
+  create: (data: Partial<LLMConfig> & { api_key: string }) =>
+    api.post<LLMConfig>('/llm-configs', data),
+
+  update: (id: number, data: Partial<LLMConfig> & { api_key?: string }) =>
+    api.put<LLMConfig>(`/llm-configs/${id}`, data),
+
+  delete: (id: number) => api.delete(`/llm-configs/${id}`),
+};
+
+// IM Bots
+export const imBotApi = {
+  list: (params?: { page?: number; page_size?: number; name?: string; type?: string; is_active?: boolean }) =>
+    api.get<PaginatedResponse<IMBot>>('/im-bots', { params }),
+
+  getById: (id: number) => api.get<IMBot>(`/im-bots/${id}`),
+
+  getActive: () => api.get<IMBot[]>('/im-bots/active'),
+
+  create: (data: Partial<IMBot> & { secret?: string }) =>
+    api.post<IMBot>('/im-bots', data),
+
+  update: (id: number, data: Partial<IMBot> & { secret?: string }) =>
+    api.put<IMBot>(`/im-bots/${id}`, data),
+
+  delete: (id: number) => api.delete(`/im-bots/${id}`),
+};
+
+// Prompts
+export const promptApi = {
+  list: (params?: { page?: number; page_size?: number; name?: string; is_system?: boolean }) =>
+    api.get<PaginatedResponse<PromptTemplate>>('/prompts', { params }),
+
+  getById: (id: number) => api.get<PromptTemplate>(`/prompts/${id}`),
+
+  getDefault: () => api.get<PromptTemplate>('/prompts/default'),
+
+  getActive: () => api.get<PromptTemplate[]>('/prompts/active'),
+
+  create: (data: Partial<PromptTemplate>) =>
+    api.post<PromptTemplate>('/prompts', data),
+
+  update: (id: number, data: Partial<PromptTemplate>) =>
+    api.put<PromptTemplate>(`/prompts/${id}`, data),
+
+  delete: (id: number) => api.delete(`/prompts/${id}`),
+
+  setDefault: (id: number) => api.post(`/prompts/${id}/set-default`),
+};
+
+// Members
+export interface TeamOverview {
+  total_members: number;
+  total_commits: number;
+  avg_score: number;
+  total_additions: number;
+  total_deletions: number;
+  trend: { date: string; commit_count: number; avg_score: number }[];
+  top_members: { author: string; commit_count: number; avg_score: number; additions: number; deletions: number }[];
+  score_distribution: { excellent: number; good: number; need_work: number };
+}
+
+export interface HeatmapDataPoint {
+  date: string;
+  count: number;
+  additions: number;
+  deletions: number;
+  week_day: number;
+  week_of_year: number;
+}
+
+export interface HeatmapResponse {
+  data: HeatmapDataPoint[];
+  total_count: number;
+  max_count: number;
+  start_date: string;
+  end_date: string;
+}
+
+export const memberApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    name?: string;
+    project_id?: number;
+    start_date?: string;
+    end_date?: string;
+    sort_by?: string;
+    sort_order?: string;
+  }) => api.get<{ total: number; page: number; page_size: number; items: any[] }>('/members', { params }),
+
+  getDetail: (params: { author: string; start_date?: string; end_date?: string }) =>
+    api.get<any>('/members/detail', { params }),
+
+  getTeamOverview: (params?: { start_date?: string; end_date?: string; project_id?: number }) =>
+    api.get<TeamOverview>('/members/overview', { params }),
+
+  getHeatmap: (params?: { start_date?: string; end_date?: string; project_id?: number; author?: string }) =>
+    api.get<HeatmapResponse>('/members/heatmap', { params }),
+};
+
+// System Logs
+export interface SystemLog {
+  id: number;
+  level: string;
+  module: string;
+  action: string;
+  message: string;
+  user_id?: number;
+  ip: string;
+  user_agent: string;
+  extra: string;
+  created_at: string;
+}
+
+export const systemLogApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    level?: string;
+    module?: string;
+    action?: string;
+    start_date?: string;
+    end_date?: string;
+    search?: string;
+  }) => api.get<{ total: number; page: number; page_size: number; items: SystemLog[] }>('/system-logs', { params }),
+
+  getModules: () => api.get<{ modules: string[] }>('/system-logs/modules'),
+
+  getRetentionDays: () => api.get<{ retention_days: number }>('/system-logs/retention'),
+
+  setRetentionDays: (days: number) => api.put<{ retention_days: number }>('/system-logs/retention', { days }),
+
+  cleanup: (days?: number) => api.post<{ deleted: number; retention_days: number }>('/system-logs/cleanup', { days }),
+};
+
+export const gitCredentialApi = {
+  list: (params?: { page?: number; page_size?: number; name?: string; platform?: string; is_active?: boolean }) =>
+    api.get<PaginatedResponse<GitCredential>>('/git-credentials', { params }),
+
+  getById: (id: number) => api.get<GitCredential>(`/git-credentials/${id}`),
+
+  getActive: () => api.get<GitCredential[]>('/git-credentials/active'),
+
+  create: (data: Partial<GitCredential> & { access_token?: string; webhook_secret?: string }) =>
+    api.post<GitCredential>('/git-credentials', data),
+
+  update: (id: number, data: Partial<GitCredential> & { access_token?: string; webhook_secret?: string }) =>
+    api.put<GitCredential>(`/git-credentials/${id}`, data),
+
+  delete: (id: number) => api.delete(`/git-credentials/${id}`),
+};
+
+export const systemConfigApi = {
+  getLDAPConfig: () => api.get<LDAPConfig>('/system-config/ldap'),
+
+  updateLDAPConfig: (data: Partial<LDAPConfig>) =>
+    api.put<LDAPConfig>('/system-config/ldap', data),
+
+  getDailyReportConfig: () => api.get<DailyReportConfig>('/system-config/daily-report'),
+
+  updateDailyReportConfig: (data: Partial<DailyReportConfig>) =>
+    api.put<DailyReportConfig>('/system-config/daily-report', data),
+
+  getChunkedReviewConfig: () => api.get<ChunkedReviewConfig>('/system-config/chunked-review'),
+
+  updateChunkedReviewConfig: (data: Partial<ChunkedReviewConfig>) =>
+    api.put<ChunkedReviewConfig>('/system-config/chunked-review', data),
+
+  getFileContextConfig: () => api.get<FileContextConfig>('/system-config/file-context'),
+
+  updateFileContextConfig: (data: Partial<FileContextConfig>) =>
+    api.put<FileContextConfig>('/system-config/file-context', data),
+
+  getAuthSessionConfig: () => api.get<AuthSessionConfig>('/system-config/auth-session'),
+
+  updateAuthSessionConfig: (data: Partial<AuthSessionConfig>) =>
+    api.put<AuthSessionConfig>('/system-config/auth-session', data),
+
+  getHolidayCountries: () => api.get<HolidayCountry[]>('/system-config/holiday-countries'),
+};
+
+export interface DailyReportConfig {
+  enabled: boolean;
+  time: string;
+  timezone: string;
+  low_score: number;
+  llm_config_id: number;
+  im_bot_ids: number[];
+  workdays_only: boolean;
+  holiday_country: string;
+}
+
+export interface HolidayCountry {
+  code: string;
+  name: string;
+  name_zh: string;
+}
+
+export interface ChunkedReviewConfig {
+  enabled: boolean;
+  threshold: number;
+  max_tokens_per_batch: number;
+}
+
+export interface FileContextConfig {
+  review_mode: string;
+  max_file_size: number;
+  max_files: number;
+}
+
+export interface AuthSessionConfig {
+  access_token_expire_hours: number;
+  refresh_token_expire_hours: number;
+}
+
+export const userApi = {
+  list: (params?: { page?: number; page_size?: number; username?: string; role?: string; auth_type?: string }) =>
+    api.get<{ items: User[]; total: number; page: number; page_size: number }>('/users', { params }),
+
+  create: (data: Partial<User> & { password?: string }) =>
+    api.post<User>('/users', data),
+
+  update: (id: number, data: { role?: string; is_active?: boolean; nickname?: string }) =>
+    api.put<User>(`/users/${id}`, data),
+
+  delete: (id: number) => api.delete(`/users/${id}`),
+};
+
+export const reviewLogApiExtra = {
+  delete: (id: number) => api.delete(`/review-logs/${id}`),
+  updateScore: (id: number, data: { score: number; reason: string }) =>
+    api.put<ReviewLog>(`/review-logs/${id}/score`, data),
+};
+
+// Daily Reports
+export interface DailyReport {
+  id: number;
+  report_date: string;
+  report_type: string;
+  total_projects: number;
+  total_commits: number;
+  total_authors: number;
+  total_additions: number;
+  total_deletions: number;
+  average_score: number;
+  passed_count: number;
+  failed_count: number;
+  pending_count: number;
+  top_projects: string;
+  top_authors: string;
+  low_score_reviews: string;
+  ai_analysis: string;
+  ai_model_used: string;
+  notified_at?: string;
+  notify_error?: string;
+  created_at: string;
+}
+
+export const dailyReportApi = {
+  list: (params?: { page?: number; page_size?: number }) =>
+    api.get<{ total: number; page: number; page_size: number; items: DailyReport[] }>('/daily-reports', { params }),
+
+  getById: (id: number) => api.get<DailyReport>(`/daily-reports/${id}`),
+
+  generate: () => api.post<{ message: string }>('/daily-reports/generate'),
+
+  resend: (id: number) => api.post<{ message: string }>(`/daily-reports/${id}/resend`),
+};
+
+// Review Templates
+export interface ReviewTemplate {
+  id: number;
+  name: string;
+  type: 'general' | 'frontend' | 'backend' | 'security' | 'custom';
+  description: string;
+  content: string;
+  is_built_in: boolean;
+  is_active: boolean;
+  created_by: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const reviewTemplateApi = {
+  list: (params?: { type?: string }) =>
+    api.get<ReviewTemplate[]>('/review-templates', { params }),
+
+  getById: (id: number) => api.get<ReviewTemplate>(`/review-templates/${id}`),
+
+  create: (data: Partial<ReviewTemplate>) =>
+    api.post<ReviewTemplate>('/review-templates', data),
+
+  update: (id: number, data: Partial<ReviewTemplate>) =>
+    api.put<ReviewTemplate>(`/review-templates/${id}`, data),
+
+  delete: (id: number) => api.delete(`/review-templates/${id}`),
+};
+
+// Review Feedback
+export interface ReviewFeedback {
+  id: number;
+  review_log_id: number;
+  user_id: number;
+  user?: { id: number; username: string; nickname?: string };
+  feedback_type: 'agree' | 'disagree' | 'question' | 'clarification';
+  user_message: string;
+  ai_response: string;
+  previous_score: number | null;
+  updated_score: number | null;
+  score_changed: boolean;
+  process_status: 'pending' | 'processing' | 'completed' | 'failed';
+  error_message: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const reviewFeedbackApi = {
+  listByReview: (reviewLogId: number) =>
+    api.get<ReviewFeedback[]>(`/review-logs/${reviewLogId}/feedbacks`),
+
+  getById: (id: number) => api.get<ReviewFeedback>(`/review-feedbacks/${id}`),
+
+  create: (data: { review_log_id: number; feedback_type: string; user_message: string }) =>
+    api.post<ReviewFeedback>('/review-feedbacks', data),
+};
+
+// AI Usage
+export interface AIUsageStats {
+  total_calls: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  success_rate: number;
+  success_count: number;
+  failure_count: number;
+  cache_hits: number;
+}
+
+export interface DailyUsage {
+  date: string;
+  calls: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+}
+
+export interface ProviderUsage {
+  provider: string;
+  model: string;
+  calls: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+  success_rate: number;
+}
+
+export const aiUsageApi = {
+  getStats: (params?: { start_date?: string; end_date?: string; project_id?: number }) =>
+    api.get<AIUsageStats>('/ai-usage/stats', { params }),
+
+  getDailyTrend: (params?: { start_date?: string; end_date?: string; project_id?: number }) =>
+    api.get<DailyUsage[]>('/ai-usage/trend', { params }),
+
+  getProviderBreakdown: (params?: { start_date?: string; end_date?: string }) =>
+    api.get<ProviderUsage[]>('/ai-usage/providers', { params }),
+};
+
+// ---- Global Search ----
+
+export interface SearchReviewItem {
+  id: number;
+  project_id: number;
+  project_name: string;
+  commit_hash: string;
+  commit_message: string;
+  author: string;
+  branch: string;
+  score: number | null;
+  review_status: string;
+  created_at: string;
+}
+
+export interface SearchProjectItem {
+  id: number;
+  name: string;
+  url: string;
+  platform: string;
+}
+
+export interface SearchResult {
+  reviews: SearchReviewItem[] | null;
+  projects: SearchProjectItem[] | null;
+  total: number;
+}
+
+export const searchApi = {
+  search: (q: string, limit?: number) =>
+    api.get<SearchResult>('/search', { params: { q, limit } }),
+};
+
+// ---- Reports ----
+
+export interface PeriodStats {
+  period: string;
+  start_date: string;
+  end_date: string;
+  total_reviews: number;
+  completed: number;
+  failed: number;
+  avg_score: number;
+  total_files: number;
+  total_additions: number;
+  total_deletions: number;
+  active_authors: number;
+}
+
+export interface TrendItem {
+  date: string;
+  reviews: number;
+  avg_score: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface AuthorRanking {
+  author: string;
+  review_count: number;
+  avg_score: number;
+  total_additions: number;
+  total_deletions: number;
+}
+
+export interface ReportResponse {
+  current: PeriodStats;
+  previous: PeriodStats;
+  trend: TrendItem[];
+  rankings: AuthorRanking[];
+}
+
+export const reportApi = {
+  getReport: (params?: { period?: string; project_id?: number }) =>
+    api.get<ReportResponse>('/reports', { params }),
+};
+
+// ---- Issue Trackers ----
+
+export interface IssueTracker {
+  id: number;
+  name: string;
+  type: string;
+  base_url: string;
+  api_token_mask: string;
+  project_key: string;
+  issue_type: string;
+  score_threshold: number;
+  is_active: boolean;
+  assignee_field: string;
+  labels: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const issueTrackerApi = {
+  list: () => api.get<IssueTracker[]>('/issue-trackers'),
+  create: (data: Partial<IssueTracker> & { api_token?: string }) =>
+    api.post<IssueTracker>('/issue-trackers', data),
+  update: (id: number, data: Partial<IssueTracker> & { api_token?: string }) =>
+    api.put<IssueTracker>(`/issue-trackers/${id}`, data),
+  delete: (id: number) => api.delete(`/issue-trackers/${id}`),
+  testConnection: (id: number) => api.post<{ message: string }>(`/issue-trackers/${id}/test`),
+};
+
+// ---- Review Rules ----
+
+export interface ReviewRule {
+  id: number;
+  name: string;
+  description: string;
+  project_id: number | null;
+  is_active: boolean;
+  priority: number;
+  condition: string;
+  threshold: number;
+  keyword: string;
+  action: string;
+  action_value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const reviewRuleApi = {
+  list: (params?: { project_id?: number }) =>
+    api.get<ReviewRule[]>('/review-rules', { params }),
+  create: (data: Partial<ReviewRule>) =>
+    api.post<ReviewRule>('/review-rules', data),
+  update: (id: number, data: Partial<ReviewRule>) =>
+    api.put<ReviewRule>(`/review-rules/${id}`, data),
+  delete: (id: number) => api.delete(`/review-rules/${id}`),
+  evaluate: (reviewLogId: number) =>
+    api.post<{ blocked: boolean; warnings: string[]; results: any[] }>(`/review-rules/evaluate/${reviewLogId}`),
+};
+
+// ---- Batch Operations ----
+
+export const reviewLogBatchApi = {
+  batchRetry: (ids: number[]) => api.post<{ message: string }>('/review-logs/batch-retry', { ids }),
+  batchDelete: (ids: number[]) => api.post<{ message: string }>('/review-logs/batch-delete', { ids }),
+};
+
+// ---- Project Members ----
+
+export interface ProjectMember {
+  id: number;
+  project_id: number;
+  user_id: number;
+  role: string;
+  user?: { id: number; username: string; nickname?: string; role?: string };
+  created_at: string;
+  updated_at: string;
+}
+
+export const projectMemberApi = {
+  list: (projectId: number) =>
+    api.get<ProjectMember[]>(`/projects/${projectId}/members`),
+  add: (projectId: number, data: { user_id: number; role: string }) =>
+    api.post<ProjectMember>(`/projects/${projectId}/members`, data),
+  update: (projectId: number, memberId: number, data: { role: string }) =>
+    api.put<ProjectMember>(`/projects/${projectId}/members/${memberId}`, data),
+  remove: (projectId: number, memberId: number) =>
+    api.delete(`/projects/${projectId}/members/${memberId}`),
+};

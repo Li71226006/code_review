@@ -1,0 +1,523 @@
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/huangang/codesentry/backend/pkg/logger"
+
+	"github.com/huangang/codesentry/backend/internal/models"
+	"github.com/huangang/codesentry/backend/internal/services"
+)
+
+// HandleGitLabWebhook processes GitLab webhook events
+func (s *Service) HandleGitLabWebhook(ctx context.Context, projectID uint, eventType string, body []byte) error {
+	logger.Infof("[Webhook] Received GitLab webhook: projectID=%d, eventType=%s", projectID, eventType)
+
+	project, err := s.projectService.GetByID(projectID)
+	if err != nil {
+		logger.Infof("[Webhook] Project not found: %d, error: %v", projectID, err)
+		return fmt.Errorf("project not found: %w", err)
+	}
+
+	if !project.AIEnabled {
+		logger.Infof("[Webhook] AI disabled for project %d, skipping", projectID)
+		return nil
+	}
+
+	switch eventType {
+	case "Push Hook":
+		if !strings.Contains(project.ReviewEvents, "push") {
+			logger.Infof("[Webhook] Push events not enabled for project %d, skipping", projectID)
+			return nil
+		}
+		var event GitLabPushEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			logger.Infof("[Webhook] Failed to parse GitLab push event: %v", err)
+			return err
+		}
+		return s.processGitLabPush(ctx, project, &event)
+
+	case "Merge Request Hook":
+		if !strings.Contains(project.ReviewEvents, "merge_request") {
+			logger.Infof("[Webhook] MR events not enabled for project %d, skipping", projectID)
+			return nil
+		}
+		var event GitLabMREvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			logger.Infof("[Webhook] Failed to parse GitLab MR event: %v", err)
+			return err
+		}
+		return s.processGitLabMR(ctx, project, &event)
+
+	default:
+		logger.Infof("[Webhook] Unknown GitLab event type: %s, skipping", eventType)
+	}
+
+	return nil
+}
+
+func (s *Service) processGitLabPush(ctx context.Context, project *models.Project, event *GitLabPushEvent) error {
+	if len(event.Commits) == 0 {
+		return nil
+	}
+
+	branch := strings.TrimPrefix(event.Ref, "refs/heads/")
+	if s.isBranchIgnored(branch, project.BranchFilter) {
+		logger.Infof("[Webhook] Branch %s is in ignore list, skipping review", branch)
+		return nil
+	}
+
+	commitSHA := event.CheckoutSHA
+	if commitSHA == "" && len(event.Commits) > 0 {
+		commitSHA = event.Commits[len(event.Commits)-1].ID
+	}
+
+	if s.isCommitAlreadyReviewed(project.ID, commitSHA) {
+		logger.Infof("[Webhook] Commit %.8s already reviewed, skipping", commitSHA)
+		return nil
+	}
+
+	var commits []string
+	var commitURL string
+	for _, c := range event.Commits {
+		commits = append(commits, fmt.Sprintf("%.8s: %s", c.ID, c.Message))
+		if commitURL == "" && c.URL != "" {
+			commitURL = c.URL
+		}
+	}
+
+	logger.Infof("[Webhook] Processing GitLab push: %d commits, branch=%s, commit=%.8s",
+		len(event.Commits), branch, commitSHA)
+
+	author := event.UserUsername
+	if author == "" {
+		author = event.UserName
+	}
+
+	services.LogInfo("Webhook", "GitLabPush", fmt.Sprintf("Processing push from %s: %d commits", author, len(event.Commits)), nil, "", "", map[string]interface{}{
+		"project_id": project.ID,
+		"branch":     branch,
+		"commit":     commitSHA,
+	})
+
+	s.setGitLabCommitStatus(project, commitSHA, "pending", "AI Review in progress...", event.ProjectID)
+
+	var diff string
+
+	// Use compare API (before→after) for accurate diffs, especially for merge commits
+	if !isNullSHA(event.Before) && event.Before != "" {
+		compareDiff, err := s.getGitLabCompareDiff(project, event.Before, commitSHA)
+		if err != nil {
+			logger.Infof("[Webhook] Compare API failed, falling back to per-commit diffs: %v", err)
+		} else if compareDiff != "" {
+			diff = compareDiff
+			logger.Infof("[Webhook] Got compare diff (before=%.8s, after=%.8s), length: %d bytes",
+				event.Before, commitSHA, len(diff))
+		}
+	}
+
+	// Fallback: fetch diffs per commit (for initial push or compare API failure)
+	if diff == "" {
+		var allDiffs strings.Builder
+		for _, c := range event.Commits {
+			d, err := s.getGitLabDiff(project, c.ID)
+			if err != nil {
+				logger.Infof("[Webhook] Failed to get diff for commit %.8s: %v", c.ID, err)
+				continue
+			}
+			allDiffs.WriteString(fmt.Sprintf("\n### Commit: %.8s\n%s\n", c.ID, d))
+		}
+		diff = allDiffs.String()
+	}
+
+	if diff == "" {
+		diff = "Failed to get diff for all commits"
+		logger.Infof("[Webhook] No diffs retrieved for any commits")
+	} else {
+		logger.Infof("[Webhook] Got combined diffs, total length: %d bytes", len(diff))
+	}
+
+	additions, deletions, filesChanged := ParseDiffStats(diff)
+
+	reviewLog := &models.ReviewLog{
+		ProjectID:     project.ID,
+		EventType:     "push",
+		CommitHash:    commitSHA,
+		CommitURL:     commitURL,
+		Branch:        branch,
+		Author:        author,
+		AuthorEmail:   event.UserEmail,
+		AuthorAvatar:  event.UserAvatar,
+		CommitMessage: strings.Join(commits, "\n"),
+		FilesChanged:  filesChanged,
+		Additions:     additions,
+		Deletions:     deletions,
+		ReviewStatus:  "pending",
+	}
+	s.reviewService.Create(reviewLog)
+
+	logger.Infof("[Webhook] Starting AI review for project %d, commit %.8s", project.ID, commitSHA)
+
+	// Enqueue review task for async processing
+	task := &services.ReviewTask{
+		ReviewLogID:     reviewLog.ID,
+		ProjectID:       project.ID,
+		CommitSHA:       commitSHA,
+		EventType:       "push",
+		Branch:          branch,
+		Author:          author,
+		AuthorEmail:     event.UserEmail,
+		AuthorAvatar:    event.UserAvatar,
+		CommitMessage:   strings.Join(commits, "\n"),
+		Diff:            diff,
+		CommitURL:       commitURL,
+		GitLabProjectID: event.ProjectID,
+	}
+
+	if err := services.GetTaskQueue().Enqueue(task); err != nil {
+		logger.Infof("[Webhook] Failed to enqueue review task: %v", err)
+		reviewLog.ReviewStatus = "failed"
+		reviewLog.ErrorMessage = "Failed to enqueue: " + err.Error()
+		s.reviewService.Update(reviewLog)
+		return err
+	}
+
+	logger.Infof("[Webhook] Review task enqueued for project %d, commit %.8s", project.ID, commitSHA)
+	return nil
+}
+
+func (s *Service) processGitLabMR(ctx context.Context, project *models.Project, event *GitLabMREvent) error {
+	if event.ObjectAttributes.Action != "open" && event.ObjectAttributes.Action != "update" {
+		return nil
+	}
+
+	if s.isBranchIgnored(event.ObjectAttributes.SourceBranch, project.BranchFilter) {
+		logger.Infof("[Webhook] Branch %s is in ignore list, skipping review", event.ObjectAttributes.SourceBranch)
+		return nil
+	}
+
+	mrIID := event.ObjectAttributes.IID
+	commitSHA, err := s.getGitLabRequestSHA(project, mrIID)
+	if err != nil {
+		logger.Infof("[Webhook] Failed to get MR commit SHA: %v", err)
+		return err
+	}
+
+	s.setGitLabCommitStatus(project, commitSHA, "pending", "AI Review in progress...", event.Project.ID)
+
+	var diff string
+	var diffErr error
+
+	// Retry loop for diff fetching to handle async MR diff calculation
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(2 * time.Second)
+		}
+
+		// Try Compare API first (more reliable and real-time, avoids async delay)
+		// Compare TargetBranch...CommitSHA (MR Head)
+		diff, diffErr = s.getGitLabCompareDiff(project, event.ObjectAttributes.TargetBranch, commitSHA)
+		if diffErr == nil && !IsEmptyDiff(diff) {
+			break
+		}
+
+		if diffErr != nil {
+			logger.Infof("[Webhook] Compare diff failed (attempt %d): %v", i+1, diffErr)
+		}
+
+		// Fallback to MR diff endpoint
+		diff, diffErr = s.getGitLabMRDiff(project, mrIID)
+		if diffErr == nil && !IsEmptyDiff(diff) {
+			break
+		}
+
+		if diffErr != nil {
+			logger.Infof("[Webhook] MR diff failed (attempt %d): %v", i+1, diffErr)
+		}
+	}
+
+	if diffErr != nil {
+		diff = "Failed to get diff: " + diffErr.Error()
+	}
+
+	additions, deletions, filesChanged := ParseDiffStats(diff)
+
+	reviewLog := &models.ReviewLog{
+		ProjectID:     project.ID,
+		EventType:     "merge_request",
+		CommitHash:    commitSHA,
+		Branch:        event.ObjectAttributes.SourceBranch,
+		Author:        event.User.Username,
+		AuthorEmail:   event.User.Email,
+		AuthorAvatar:  event.User.AvatarURL,
+		CommitMessage: event.ObjectAttributes.Title,
+		FilesChanged:  filesChanged,
+		Additions:     additions,
+		Deletions:     deletions,
+		MRNumber:      &mrIID,
+		MRURL:         event.ObjectAttributes.URL,
+		ReviewStatus:  "pending",
+	}
+	s.reviewService.Create(reviewLog)
+
+	// Enqueue review task for async processing
+	task := &services.ReviewTask{
+		ReviewLogID:     reviewLog.ID,
+		ProjectID:       project.ID,
+		CommitSHA:       commitSHA,
+		EventType:       "merge_request",
+		Branch:          event.ObjectAttributes.SourceBranch,
+		Author:          event.User.Username,
+		AuthorEmail:     event.User.Email,
+		AuthorAvatar:    event.User.AvatarURL,
+		CommitMessage:   event.ObjectAttributes.Title + "\n" + event.ObjectAttributes.Description,
+		Diff:            diff,
+		MRNumber:        &mrIID,
+		MRURL:           event.ObjectAttributes.URL,
+		GitLabProjectID: event.Project.ID,
+	}
+
+	if err := services.GetTaskQueue().Enqueue(task); err != nil {
+		logger.Infof("[Webhook] Failed to enqueue MR review task: %v", err)
+		reviewLog.ReviewStatus = "failed"
+		reviewLog.ErrorMessage = "Failed to enqueue: " + err.Error()
+		s.reviewService.Update(reviewLog)
+		return err
+	}
+
+	logger.Infof("[Webhook] MR review task enqueued for project %d, MR #%d", project.ID, mrIID)
+	return nil
+}
+
+func (s *Service) getGitLabDiff(project *models.Project, commitSHA string) (string, error) {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits/%s/diff",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), commitSHA)
+
+	return s.fetchDiff(apiURL, project.AccessToken, "PRIVATE-TOKEN")
+}
+
+func (s *Service) getGitLabCompareDiff(project *models.Project, from, to string) (string, error) {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/compare?from=%s&to=%s&straight=false",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), from, to)
+
+	logger.Infof("[Webhook] Fetching GitLab compare diff: %.8s...%.8s", from, to)
+
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	if project.AccessToken != "" {
+		req.Header.Set("PRIVATE-TOKEN", project.AccessToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitLab compare API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Diffs []struct {
+			Diff    string `json:"diff"`
+			OldPath string `json:"old_path"`
+			NewPath string `json:"new_path"`
+		} `json:"diffs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse compare response: %w", err)
+	}
+
+	var diffBuilder strings.Builder
+	for _, d := range result.Diffs {
+		diffBuilder.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", d.OldPath, d.NewPath))
+		diffBuilder.WriteString(fmt.Sprintf("--- a/%s\n+++ b/%s\n", d.OldPath, d.NewPath))
+		diffBuilder.WriteString(d.Diff)
+		if !strings.HasSuffix(d.Diff, "\n") {
+			diffBuilder.WriteString("\n")
+		}
+	}
+
+	return diffBuilder.String(), nil
+}
+
+func (s *Service) getGitLabMRDiff(project *models.Project, mrIID int) (string, error) {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/diffs",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), mrIID)
+
+	return s.fetchDiff(apiURL, project.AccessToken, "PRIVATE-TOKEN")
+}
+
+func (s *Service) getGitLabRequestSHA(project *models.Project, mrIID int) (string, error) {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), mrIID)
+
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	if project.AccessToken != "" {
+		req.Header.Set("PRIVATE-TOKEN", project.AccessToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	if sha, ok := result["sha"].(string); ok {
+		return sha, nil
+	}
+	return "", fmt.Errorf("sha not found")
+}
+
+func (s *Service) setGitLabCommitStatus(project *models.Project, sha string, state string, description string, gitlabProjectID int) {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		logger.Infof("[Webhook] Failed to parse repo info for GitLab status update: %v", err)
+		return
+	}
+
+	projectIdentifier := strings.ReplaceAll(info.projectPath, "/", "%2F")
+	if gitlabProjectID > 0 {
+		projectIdentifier = fmt.Sprintf("%d", gitlabProjectID)
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/statuses/%s",
+		info.baseURL, projectIdentifier, sha)
+
+	data := map[string]string{
+		"state":       state,
+		"context":     "codesentry/ai-review",
+		"description": description,
+	}
+
+	payload, _ := json.Marshal(data)
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(payload))
+	if err != nil {
+		logger.Infof("[Webhook] Failed to create GitLab status request: %v", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if project.AccessToken != "" {
+		req.Header.Set("PRIVATE-TOKEN", project.AccessToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		logger.Infof("[Webhook] Failed to send GitLab commit status: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		logger.Infof("[Webhook] Failed to set GitLab commit status (code %d): %s", resp.StatusCode, string(body))
+	} else {
+		logger.Infof("[Webhook] Set GitLab commit status for %.8s to %s", sha, state)
+	}
+}
+
+func (s *Service) postGitLabMRComment(project *models.Project, mrIID int, comment string) error {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%d/notes",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), mrIID)
+
+	body := fmt.Sprintf(`{"body": %q}`, comment)
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if project.AccessToken != "" {
+		req.Header.Set("PRIVATE-TOKEN", project.AccessToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitLab API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	logger.Infof("[Webhook] Posted comment to GitLab MR %d", mrIID)
+	return nil
+}
+
+func (s *Service) postGitLabCommitComment(project *models.Project, commitSHA string, comment string) error {
+	info, err := parseRepoInfo(project.URL)
+	if err != nil {
+		return err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits/%s/comments",
+		info.baseURL, strings.ReplaceAll(info.projectPath, "/", "%2F"), commitSHA)
+
+	body := fmt.Sprintf(`{"note": %q}`, comment)
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if project.AccessToken != "" {
+		req.Header.Set("PRIVATE-TOKEN", project.AccessToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitLab API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	logger.Infof("[Webhook] Posted comment to GitLab commit %.8s", commitSHA)
+	return nil
+}
