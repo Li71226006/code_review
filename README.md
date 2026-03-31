@@ -45,15 +45,17 @@ sequenceDiagram
 
     rect rgb(245, 245, 255)
         Note over Webhook, Git: 第二阶段：获取完整源码并解析 (V1/V2)
-        Webhook->>Git: 请求获取这 N 个文件的【完整源代码】
-        Git-->>Webhook: 返回完整源代码
+        Webhook->>Git: 请求获取这 N 个文件的【完整源代码】 (用于构建 File Context)
+        Git-->>Webhook: 返回被修改文件的完整源码
         
         alt V1 模式 (轻量级)
             Parser->>Parser: 在完整源码中，截取 Diff 上下 10 行并合并
         else V2 模式 (专家级)
             Parser->>Parser: 组装 File Context (AST 提取完整函数块)
-            Parser->>Parser: 组装 Callers Context (全网查谁调用了被改函数)
-            Parser->>Parser: 组装 Callee Context (查被改代码调用的底层规范)
+            Webhook->>Git: 请求获取整个仓库的【全量文件树及源码】 (受限于接口能力及配置)
+            Git-->>Webhook: 返回全量源码 (或 fallback 到仅 Diff 文件)
+            Parser->>Parser: 组装 Callers Context (全局扫描谁调用了被改函数)
+            Parser->>Parser: 组装 Callee Context (全局扫描被改代码调用的底层规范)
         end
     end
 
