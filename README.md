@@ -167,9 +167,9 @@ sequenceDiagram
 - `api.getReviewLogs()`: 获取审查流水和统计数据。
 - `api.getPrompts()` / `api.updatePrompt()`: 系统 Prompt 管理。
 
-## 编译与 Docker 打包流程
+## 编译与 Docker 打包部署流程
 
-### 1. 本地编译与运行
+### 1. 本地编译与运行 (开发环境)
 **后端编译**:
 ```bash
 cd backend
@@ -186,32 +186,29 @@ npm install
 npm run dev
 ```
 
-### 2. Docker 生产环境打包
-项目根目录提供了完整的 `Dockerfile`，采用多阶段构建，将前端静态文件打包并嵌入 Go 二进制文件中。
+### 2. Docker 生产环境一键部署 (推荐)
+项目根目录提供了完整的 `docker-compose.yml`，它会自动帮您拉起 **CodeSentry 主程序** 和 **PostgreSQL 数据库**（如果需要还可以扩展 Redis）。
 
-**构建镜像**:
+**获取离线镜像包 (适用于内网部署)**:
+如果您已经拿到打包好的 `.tar` 文件，可以直接加载：
 ```bash
-docker build -t zhazha/code-reviewer-aoi:latest .
-```
-
-**导出离线包 (适用于内网部署)**:
-```bash
-docker save -o code-reviewer-aoi.tar zhazha/code-reviewer-aoi:latest
-```
-
-**在内网加载并运行**:
-```bash
-# 加载镜像
 docker load -i code-reviewer-aoi.tar
-
-# 运行容器 (请挂载 config.yaml 和 data 目录)
-docker run -d \
-  --name code-reviewer \
-  -p 8080:8080 \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/data:/app/data \
-  zhazha/code-reviewer-aoi:latest
 ```
+
+**配置并启动**:
+1. 确保当前目录下有 `docker-compose.yml` 文件。
+2. 检查 `docker-compose.yml` 中的环境变量配置（如数据库密码、端口等）。
+3. 一键拉起所有服务：
+```bash
+docker-compose up -d
+```
+
+**关于 docker-compose 的原理解释**:
+- **PostgreSQL 容器 (`db`)**: 系统会自动下载 `postgres:15-alpine` 镜像作为主数据库，并将数据持久化挂载到宿主机的 `./data/postgres` 目录下，防止重启丢失数据。
+- **CodeSentry 容器 (`app`)**: 依赖于数据库启动。它通过内部网络直接连接到 `db` 容器。您可以直接通过环境变量（如 `DB_DSN`）覆盖配置文件，极大地简化了部署流程。
+- **端口映射**: 默认情况下，Web 界面和 API 服务将暴露在宿主机的 `8080` 端口上。
+
+部署成功后，在浏览器访问 `http://localhost:8080` 即可进入系统后台。
 
 ## 配置说明
 
