@@ -186,29 +186,29 @@ npm install
 npm run dev
 ```
 
-### 2. Docker 生产环境一键部署 (推荐)
-项目根目录提供了完整的 `docker-compose.yml`，它会自动帮您拉起 **CodeSentry 主程序** 和 **PostgreSQL 数据库**（如果需要还可以扩展 Redis）。
+### 2. 内网离线一键部署 (基于 docker-compose)
+生产环境推荐使用项目根目录下的 `docker-compose.yml` 进行一键编排，它会自动拉起 **CodeSentry 主程序** 和 **PostgreSQL 数据库**。
 
-**获取离线镜像包 (适用于内网部署)**:
-如果您已经拿到打包好的 `.tar` 文件，可以直接加载：
+**第一步：加载离线镜像**
+在内网服务器上，将准备好的两个离线镜像包加载进 Docker：
 ```bash
+# 1. 加载 PostgreSQL 数据库镜像
+docker load -i postgres.tar
+
+# 2. 加载 CodeSentry 主程序镜像
 docker load -i code-reviewer-aoi.tar
 ```
 
-**配置并启动**:
-1. 确保当前目录下有 `docker-compose.yml` 文件。
-2. 检查 `docker-compose.yml` 中的环境变量配置（如数据库密码、端口等）。
-3. 一键拉起所有服务：
+**第二步：一键启动**
+确保当前目录下有 `docker-compose.yml` 文件，直接执行：
 ```bash
 docker-compose up -d
 ```
 
-**关于 docker-compose 的原理解释**:
-- **PostgreSQL 容器 (`db`)**: 系统会自动下载 `postgres:15-alpine` 镜像作为主数据库，并将数据持久化挂载到宿主机的 `./data/postgres` 目录下，防止重启丢失数据。
-- **CodeSentry 容器 (`app`)**: 依赖于数据库启动。它通过内部网络直接连接到 `db` 容器。您可以直接通过环境变量（如 `DB_DSN`）覆盖配置文件，极大地简化了部署流程。
-- **端口映射**: 默认情况下，Web 界面和 API 服务将暴露在宿主机的 `8080` 端口上。
-
-部署成功后，在浏览器访问 `http://localhost:8080` 即可进入系统后台。
+**`docker-compose.yml` 核心配置说明**:
+- **`db` 节点 (PostgreSQL)**: 使用加载好的 postgres 镜像。数据卷挂载在 `./data/postgres`，保证容器重启或更新时数据不丢失。
+- **`app` 节点 (CodeSentry)**: 依赖 `db` 启动。通过环境变量（如 `DB_DSN`）直接注入数据库连接信息，通过 `OPENAI_API_KEY` 注入大模型密钥。配置文件和日志挂载在 `./data/app`。
+- **端口访问**: 宿主机的 `8080` 端口映射到了主程序的 Web 界面和 API 端口，启动后直接访问 `http://IP:8080` 即可。
 
 ## 配置说明
 
