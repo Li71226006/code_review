@@ -36,8 +36,8 @@ sequenceDiagram
     rect rgb(240, 248, 255)
         Note over Webhook, Git: 第一阶段：获取 Diff 并筛选核心文件
         Webhook->>Git: 请求获取本次 Commit 的 Diff 补丁
-        Git-->>Webhook: 返回 Diff 数据 (只包含 + 和 - 的代码行)
-        Webhook->>Parser: 过滤掉 lock 文件、静态资源等
+        Git-->>Webhook: 返回 Diff 数据 (仅包含 + 和 - 的上下几行代码)
+        Webhook->>Parser: 过滤掉 lock 文件、静态资源和指定分支等
         Parser->>Parser: 按照代码修改量降序排列，只保留前 N 个核心文件
     end
 
@@ -80,7 +80,13 @@ sequenceDiagram
 
 ## 提示词工程 (Prompt Engineering) 参考示例
 
-为了让大模型能够精准地理解代码并输出结构化的审查报告，系统采用了**变量注入**和**严格指令**相结合的 Prompt 设计。以下是系统推荐的标准提示词模板，它完美契合了 V2 引擎的双向追溯和孤儿代码提取逻辑：
+为了让大模型能够精准地理解代码并输出结构化的审查报告，系统采用了**变量注入**和**严格指令**相结合的 Prompt 设计。以下是系统推荐的**标准提示词模板**。
+
+> 💡 **自定义指南**：
+> 1. **可以随意修改的地方**：您可以自由修改“角色设定”、“评分维度（比如改为满分 10 分或取消打分）”、“审查原则（比如增加对公司特定编码规范的强制要求）”以及“输出格式”。
+> 2. **千万不能动的地方**：底部的四个变量占位符 `{{file_context}}`, `{{callers_context}}`, `{{callee_context}}`, `{{commits}}` 是系统底层动态替换的核心，**必须保留原样**（如果您的项目不需要 V2 的追溯，可以删掉 caller/callee 变量以节省 Token）。
+
+### 系统默认 Prompt 模板
 
 ```markdown
 你是一位资深的软件开发工程师。你的任务是对提交的代码进行专业、聚焦的代码审查。 
@@ -133,6 +139,95 @@ sequenceDiagram
 **提交历史（commits）**： 
 {{commits}}
 ```
+
+### Prompt 渲染效果示例 (大模型最终看到的视角)
+
+当系统运行时，后端的引擎会将真实的源码提取出来并替换上述的占位符。以下是某次 `Performance_monitor.py` 提交后，**发给大模型的最终真实文本截取示例**：
+
+```markdown
+... (前面是您的指令和输出格式要求) ...
+
+--- 
+**本次修改的代码及完整上下文参考 (Context & Diff)**： 
+（带 `+` 和 `-` 标记的行代表本次修改，你只需关注这些行及其直接影响） 
+#### `Performance_monitor.py` (Lines 112-138) 
+```python 
+ 112 |               interval: 监控间隔时间(秒) 
+ 113 |           """ 
+ 114 |           if self.monitoring: 
+ 115 |               return 
+ 116 |               
+ 117 |           self.monitoring = True 
+ 118 |           self.monitor_thread = threading.Thread( 
+ 119 |               target=self._monitor_loop, 
+ 120 |               args=(interval,), 
+ 121 |               daemon=True 
+ 122 |          ) 
+ 123 |          self.monitor_thread.start() 
+ 124 |          logger.info(f"开始系统监控，间隔{interval}秒") 
+ 125 | +        print(f"开始系统监控，间隔{interval}秒") 
+ 126 |          
+ 127 |      def stop_monitoring(self): 
+ 128 |          """停止监控系统资源""" 
+ 129 |           self.monitoring = False 
+ 130 |           if self.monitor_thread: 
+ 131 |               self.monitor_thread.join(timeout=2) 
+ 132 |           logger.info("停止系统监控") 
+ 133 |           logger.info("在干什么？") 
+ 134 |           
+ 135 |       def _monitor_loop(self, interval: float): 
+ 136 |           """监控循环""" 
+ 137 |           while self.monitoring: 
+ 138 |               try: 
+``` 
+
+#### `Performance_monitor.py` (Lines 170-196) 
+```python 
+ 170 |           gpu_temperature = [] 
+ 171 |           
+ 172 |           if GPU_AVAILABLE: 
+ 173 |               try: 
+ 174 |                   gpus = GPUtil.getGPUs() 
+ 175 |                   gpu_count = len(gpus) 
+ 176 |                   for gpu in gpus: 
+ 177 |                       gpu_utilization.append(gpu.load * 100)  # 转换为百分比 
+ 178 |                       gpu_memory_used.append(gpu.memoryUsed / 1024)  # 转换为GB 
+ 179 |                       gpu_memory_total.append(gpu.memoryTotal / 1024)  # 转换为GB 
+ 180 |                      gpu_temperature.append(gpu.temperature) 
+ 181 |              except Exception as e: 
+ 182 |                  logger.warning(f"获取GPU信息失败: {e}") 
+ 183 | +                print(f"获取GPU信息失败: {e}") 
+ 184 |          
+ 185 |          return SystemMetrics( 
+ 186 |              cpu_percent=cpu_percent, 
+ 187 | 
+ 188 | 
+ 189 |               memory_percent=memory_percent, 
+ 190 |               memory_used_gb=memory_used_gb, 
+ 191 |               memory_total_gb=memory_total_gb, 
+ 192 |               memory_available_gb=memory_available_gb, 
+ 193 |               gpu_count=gpu_count, 
+ 194 |               gpu_utilization=gpu_utilization, 
+ 195 |               gpu_memory_used=gpu_memory_used, 
+ 196 |               gpu_memory_total=gpu_memory_total, 
+``` 
+
+--- 
+**跨文件调用影响分析 (Callers Context)**： 
+（调用了本次修改函数的上游代码。请检查本次修改是否导致它们报错） 
+*(若无跨文件调用则为空)*
+
+--- 
+**被调用函数定义参考 (Callee Context)**： 
+（本次新增/修改代码中调用的底层函数定义。请检查本次调用传参是否正确） 
+*(若无底层调用则为空)*
+
+--- 
+**提交历史（commits）**： 
+72b75651: Update Performance_monitor.py
+```
+
+*(注意：在上述渲染后的示例中，大模型可以清楚地看到代码的上下文行号，以及 `+` 标记出的新增打印语句，从而精准给出审查意见，避免胡乱猜测。)*
 
 ## 双引擎解析逻辑 (V1 vs V2)
 
