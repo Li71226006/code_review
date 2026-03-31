@@ -278,25 +278,6 @@ services:
       - ./data/app:/app/data
 ```
 
-## Webhook 接入指南
-
-您只需要在代码托管平台上配置一个统一的 Webhook 地址，系统会自动识别平台类型（GitHub / GitLab）。
-
-**Webhook URL 示例**:
-`https://your-domain/api/webhook/auto/default`
-
-### GitLab 配置步骤
-1. 进入项目设置 (Project Settings) > Webhooks
-2. URL 填写: `https://your-domain/api/webhook/gitlab/default`
-3. Secret Token 填写: 您在系统后台配置的 Webhook Secret
-4. Trigger (触发器): 勾选 **Push events** 和 **Merge request events**
-
-### GitHub 配置步骤
-1. 进入仓库设置 (Repository Settings) > Webhooks > Add webhook
-2. Payload URL 填写: `https://your-domain/api/webhook/github/default`
-3. Content type 选择: `application/json`
-4. Secret 填写: 您在系统后台配置的 Webhook Secret
-5. Events (事件): 勾选 **Pull requests** 和 **Pushes**
 ## 目录结构
 
 ```text
