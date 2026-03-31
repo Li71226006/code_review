@@ -80,36 +80,61 @@ sequenceDiagram
     Webhook->>Git: 将最终的审查报告写回 PR 评论区 / Commit 留言
 ```
 
-## 提示词工程 (Prompt Engineering) 指南
+## 提示词工程 (Prompt Engineering) 参考示例
 
-为了让大模型能够精准地理解代码并输出结构化的审查报告，系统采用了**变量注入**和**严格指令**相结合的 Prompt 设计。在给技术 Leader 演示时，可以重点介绍以下设计哲学：
+为了让大模型能够精准地理解代码并输出结构化的审查报告，系统采用了**变量注入**和**严格指令**相结合的 Prompt 设计。以下是系统推荐的标准提示词模板，它完美契合了 V2 引擎的双向追溯和孤儿代码提取逻辑：
 
-### 1. 核心上下文变量 (Variables)
-系统在发起 AI 请求前，会将真实提取到的代码上下文替换掉 Prompt 中的占位符：
-- `{{file_context}}`: 包含当前被修改文件的完整上下文（V1 模式为片段合并，V2 模式为完整函数块），并用 `+` 和 `-` 精确标记修改行。
-- `{{callers_context}}`: (仅 V2) 注入调用了被修改函数的上游代码块。
-- `{{callee_context}}`: (仅 V2) 注入被修改代码中所调用的底层函数定义。
-- `{{commits}}`: 注入本次提交的 Commit Message 历史，帮助 AI 理解开发者的修改意图。
-
-### 2. 编写与修改 Prompt 的“讲究”
-如果您需要在后台修改系统提示词，请务必遵循以下原则：
-
-*   **必须强制 AI 聚焦修改行**：
-    由于我们提供了完整的函数上下文，如果不加约束，AI 会去“挑刺”函数里原本就存在的历史老 Bug。
-    *正确写法示例*：`你只能审查带有 '+'（新增）和 '-'（删除）标记的代码行，以及它们对当前函数逻辑的直接影响。严禁指出未修改代码中的问题。`
-*   **引导双向依赖检查 (V2 特属)**：
-    必须在 Prompt 中明确告诉 AI 怎么使用 `{{callers_context}}` 和 `{{callee_context}}`。
-    *正确写法示例*：`如果本次修改改变了某函数的输入/输出，必须检查下方的【跨文件调用影响分析 (Callers)】，确认是否导致其他调用方崩溃。`
-*   **按函数/模块结构化输出**：
-    为了让开发者一目了然，建议强制 AI 按照修改的函数名进行分组输出，并规定只输出有问题的部分。
-    *正确写法示例*：`请遍历提供的 Context，以被修改的函数/类为单位进行输出。如果该函数修改没有问题，请仅输出“✅ 该函数修改无异常”。`
-*   **强制打分格式**：
-    系统后端会正则匹配 AI 返回的文本来提取分数，如果格式不对会导致分数解析失败（默认为 0）。
-    *正确写法示例*：`请在结尾严格按此格式输出总分："总分:XX 分"（例如：总分:80 分）。`
-
-### 3. 如何屏蔽不必要的上下文以节省 Token？
-如果您的项目非常庞大，为了极致省钱，您可以在 Prompt 模板中直接**删除**不需要的变量。
-例如：将 `{{repo_map}}` 占位符从 Prompt 中删除。后端在渲染时发现 Prompt 里没有这个变量，就会智能跳过对应的解析逻辑，从而节省计算资源和 Token 开销。
+```markdown
+你是一位资深的软件开发工程师。你的任务是对提交的代码进行专业、聚焦的代码审查。 
+ 
+## 核心审查原则（最高优先级，绝对服从） 
+1. **绝对聚焦修改行**：你**只能**审查带有 `+`（新增）和 `-`（删除）标记的代码行，以及它们对当前函数逻辑的直接影响。 
+2. **无视历史遗留问题**：严禁指出未修改代码（没有 `+` 或 `-` 标记的行）中的 Bug、不规范或优化空间。只要不是这次改动引入的，就当没看见。 
+3. **严格的跨文件双向校验**： 
+   - **向外看 (Callers)**：如果本次修改改变了某函数的输入/输出定义，必须检查下方的【跨文件调用影响分析】，确认是否导致其他调用方崩溃。 
+   - **向内看 (Callee)**：如果本次修改新增或修改了对某个底层函数的调用，必须检查下方的【被调用函数定义参考】，确认传入的参数类型和数量是否符合原函数要求。 
+ 
+## 评分维度（总分 100 分） 
+1. **修改逻辑的正确性（50 分）**：本次修改是否达到了预期目的，有没有引入新的 Bug。 
+2. **跨模块兼容性（30 分）**：本次修改是否破坏了上下游的调用约定（重点结合 Callers/Callee 检查）。 
+3. **代码健壮性与安全（15 分）**：新增的代码是否有安全隐患或可能导致异常。 
+4. **提交信息质量（5 分）**：commit 信息是否清晰。 
+ 
+## 输出格式（Markdown） 
+请严格按照以下结构输出，不要说多余的废话： 
+ 
+### 一、修改点审查意见（按函数分组） 
+（请遍历提供的 Context，以被修改的函数/类为单位进行输出。如果该函数修改没有问题，请写“✅ 该函数修改无异常”） 
+ 
+- **函数/模块名**：`generate_report` (文件: `Performance_monitor.py`) 
+  - **问题/风险**：[直接说明带 `+` 或 `-` 的行有什么问题，或者与 Callers/Callee 有什么冲突] 
+  - **优化建议**：[给出具体的修改代码] 
+ 
+### 二、评分明细 
+- 按四个评分维度给出具体分数和简短理由。 
+ 
+### 三、总分（特别重要） 
+- 格式必须为："总分:XX 分"（例如：总分:80 分）。 
+ 
+--- 
+**本次修改的代码及完整上下文参考 (Context & Diff)**： 
+（带 `+` 和 `-` 标记的行代表本次修改，你只需关注这些行及其直接影响） 
+{{file_context}} 
+ 
+--- 
+**跨文件调用影响分析 (Callers Context)**： 
+（调用了本次修改函数的上游代码。请检查本次修改是否导致它们报错） 
+{{callers_context}} 
+ 
+--- 
+**被调用函数定义参考 (Callee Context)**： 
+（本次新增/修改代码中调用的底层函数定义。请检查本次调用传参是否正确） 
+{{callee_context}} 
+ 
+--- 
+**提交历史（commits）**： 
+{{commits}}
+```
 
 ## 双引擎解析逻辑 (V1 vs V2)
 
@@ -206,27 +231,51 @@ docker-compose up -d
 ```
 
 **`docker-compose.yml` 核心配置说明**:
-- **`db` 节点 (PostgreSQL)**: 使用加载好的 postgres 镜像。数据卷挂载在 `./data/postgres`，保证容器重启或更新时数据不丢失。
-- **`app` 节点 (CodeSentry)**: 依赖 `db` 启动。通过环境变量（如 `DB_DSN`）直接注入数据库连接信息，通过 `OPENAI_API_KEY` 注入大模型密钥。配置文件和日志挂载在 `./data/app`。
-- **端口访问**: 宿主机的 `8080` 端口映射到了主程序的 Web 界面和 API 端口，启动后直接访问 `http://IP:8080` 即可。
-
-## 配置说明
-
-复制 `config.yaml.example` 为 `config.yaml` 并根据需要进行修改：
 
 ```yaml
-server:
-  port: 8080
-  mode: release  # debug, release, test
+version: '3.8'
 
-database:
-  driver: postgres # 生产环境推荐使用 postgres
-  # PostgreSQL 连接示例: host=localhost user=postgres password=xxx dbname=codesentry port=5432 sslmode=disable
-  dsn: host=localhost user=postgres password=xxx dbname=codesentry port=5432 sslmode=disable
+services:
+  # 1. db节点 (PostgreSQL): 使用加载好的 postgres 镜像。
+  # 数据卷挂载在 ./data/postgres，保证容器重启或更新时数据不丢失。
+  db:
+    image: postgres:15-alpine
+    container_name: code_review_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123456"
+      POSTGRES_DB: codesentry
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
 
-jwt:
-  secret: your-secret-key-change-in-production
-  expire_hour: 24
+  # 2. app节点 (CodeSentry): 依赖 db 启动。
+  # 通过环境变量（如 DB_DSN）直接注入数据库连接信息，通过 OPENAI_API_KEY 注入大模型密钥。
+  # 配置文件和日志挂载在 ./data/app。
+  # 端口访问：本机的 8080 端口映射到了主程序的 Web 界面和 API 端口，启动后直接访问 http://IP:8080 即可。
+  app:
+    image: zhazha/code-reviewer-aoi:latest
+    container_name: codesentry_app
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"
+    environment:
+      # 对应 config.yaml 中的 server.port 和 server.mode
+      - SERVER_PORT=8080
+      - SERVER_MODE=release
+      # 对应 config.yaml 中的 database.driver 和 database.dsn
+      - DB_DRIVER=postgres
+      - DB_DSN=host=db user=postgres password=123456 dbname=codesentry port=5432 sslmode=disable TimeZone=Asia/Shanghai
+      # 对应 config.yaml 中的 jwt.secret 和 jwt.expire_hour
+      - JWT_SECRET=your-secret-key-change-in-production
+      - JWT_EXPIRE_HOUR=24
+      # 大模型配置
+      - OPENAI_API_KEY=your_openai_api_key
+      - OPENAI_BASE_URL=https://api.openai.com/v1
+    volumes:
+      - ./data/app:/app/data
 ```
 
 ## Webhook 接入指南
